@@ -1,0 +1,75 @@
+body {
+    background-color: #0f1117;
+    color: #f3f4f6;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    min-height: 100vh;
+    margin: 0;
+}
+
+.app-container {
+    display: flex;
+    min-height: 100vh;
+    width: 100%;
+}
+
+.sidebar {
+    width: 280px;
+    min-width: 280px;
+    background-color: #181b24;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 100;
+    overflow-y: auto;
+}
+
+.main-content {
+    margin-left: 280px;
+    flex-grow: 1;
+    padding: 2rem 2.5rem;
+    width: calc(100% - 280px);
+    max-width: 1600px;
+}
+
+.card-custom {
+    background-color: #181b24;
+    border: 1px solid #2e3446;
+    border-radius: 12px;
+}
+
+.select2-container--bootstrap-5 .select2-selection {
+    background-color: #212529 !important;
+    border-color: #495057 !important;
+    color: #f8f9fa !important;
+}
+.select2-container--bootstrap-5 .select2-selection__rendered {
+    color: #f8f9fa !important;
+}
+.select2-dropdown {
+    background-color: #181b24 !important;
+    border-color: #2e3446 !important;
+    color: #f3f4f6 !important;
+}
+.select2-search__field {
+    background-color: #0f1117 !important;
+    border-color: #2e3446 !important;
+    color: #f3f4f6 !important;
+}
+
+@media (max-width: 992px) {
+    .sidebar {
+        position: relative;
+        width: 100%;
+        min-width: 100%;
+        height: auto;
+    }
+    .main-content {
+        margin-left: 0;
+        width: 100%;
+        padding: 1.5rem;
+    }
+    .app-container {
+        flex-direction: column;
+    }
+}
