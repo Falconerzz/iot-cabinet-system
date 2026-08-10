@@ -119,3 +119,5 @@ $masters = $conn->query("SELECT * FROM master_equipments ORDER BY equipment_name
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+
+<!-- 11/8/2569 05:07 -->

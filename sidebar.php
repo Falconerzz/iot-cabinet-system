@@ -48,3 +48,5 @@ $current_page = basename($_SERVER['PHP_SELF']);
         <a href="logout.php" class="btn btn-outline-danger btn-sm w-100"><i class="bi bi-door-closed me-1"></i> ออกจากระบบ</a>
     </div>
 </div>
+
+<!-- 11/8/2569 05:07 -->
