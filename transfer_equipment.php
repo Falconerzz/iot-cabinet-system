@@ -1,408 +1,415 @@
 <?php
-require_once 'config.php';
-check_login();
+require_once 'config.php'; check_login();
 
-$projects_res = $conn->query("SELECT id, project_name, control_iot_id, dc_iot_id FROM projects ORDER BY project_name ASC");
-$projects = [];
-while($p = $projects_res->fetch_assoc()) {
-    $projects[] = $p;
+$user_action = isset($_SESSION['username']) ? $_SESSION['username'] : 'admin';
+$success_msg = '';
+$error_msg = '';
+
+// ==========================================
+// 🌟 1. ระบบจัดการเมื่อกดปุ่ม "ยืนยันการโยกย้าย" (รองรับสลับ และ โยกย้ายปกติ)
+// ==========================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $eq_id = intval($_POST['equipment_id']);
+    $from_pid = intval($_POST['from_project_id']);
+    $to_pid = intval($_POST['to_project_id']);
+
+    if ($eq_id > 0 && $from_pid > 0 && $to_pid > 0 && $from_pid !== $to_pid) {
+        
+        // ดึงข้อมูลชื่อและ S/N
+        $eq_info = $conn->query("SELECT equipment_name, serial_number FROM equipments WHERE id=$eq_id")->fetch_assoc();
+        $from_info = $conn->query("SELECT cabinet_id, project_name FROM projects WHERE id=$from_pid")->fetch_assoc();
+        $to_info = $conn->query("SELECT cabinet_id, project_name FROM projects WHERE id=$to_pid")->fetch_assoc();
+
+        if ($eq_info && $from_info && $to_info) {
+            $eq_name = $eq_info['equipment_name'];
+            $sn1 = $eq_info['serial_number'] ? $eq_info['serial_number'] : '-';
+            $eq_name_esc = $conn->real_escape_string($eq_name);
+            
+            // 🌟 ตรวจสอบว่าตู้ปลายทางมีอุปกรณ์ "ชื่อเดียวกัน" นี้อยู่แล้วหรือไม่?
+            $check_target = $conn->query("SELECT id, serial_number FROM equipments WHERE project_id=$to_pid AND equipment_name='$eq_name_esc'");
+
+            if ($check_target && $check_target->num_rows > 0) {
+                // ==============================================
+                // กรณีที่ 1: ตู้ปลายทางมีของชิ้นนี้อยู่แล้ว -> สลับกัน (SWAP)
+                // ==============================================
+                $target_eq = $check_target->fetch_assoc();
+                $target_eq_id = $target_eq['id'];
+                $sn2 = $target_eq['serial_number'] ? $target_eq['serial_number'] : '-';
+
+                // ย้ายของเดิม(ตู้ A) ไปตู้ใหม่(ตู้ B)
+                $conn->query("UPDATE equipments SET project_id = $to_pid WHERE id = $eq_id");
+                // ย้ายของใหม่(ตู้ B) กลับมาตู้เดิม(ตู้ A)
+                $conn->query("UPDATE equipments SET project_id = $from_pid WHERE id = $target_eq_id");
+
+                // บันทึก Log ตู้ต้นทาง
+                $log_from = "[$user_action] สลับอุปกรณ์ {$eq_name} (S/N: $sn1) ไปยังตู้ {$to_info['cabinet_id']} และได้รับ (S/N: $sn2) เข้ามาแทนที่";
+                $conn->query("INSERT INTO activity_logs (project_id, action_type, description) VALUES ($from_pid, 'TRANSFER_EQUIPMENT', '$log_from')");
+
+                // บันทึก Log ตู้ปลายทาง
+                $log_to = "[$user_action] สลับอุปกรณ์ {$eq_name} (S/N: $sn2) กลับไปยังตู้ {$from_info['cabinet_id']} และได้รับ (S/N: $sn1) เข้ามาแทนที่";
+                $conn->query("INSERT INTO activity_logs (project_id, action_type, description) VALUES ($to_pid, 'TRANSFER_EQUIPMENT', '$log_to')");
+
+                $success_msg = "สลับอุปกรณ์ {$eq_name} ระหว่างตู้สำเร็จเรียบร้อยแล้ว!";
+
+            } else {
+                // ==============================================
+                // กรณีที่ 2: ตู้ปลายทางยังไม่มีของชิ้นนี้ -> โยกย้ายปกติ (MOVE)
+                // ==============================================
+                $conn->query("UPDATE equipments SET project_id = $to_pid WHERE id = $eq_id");
+
+                // บันทึก Log ตู้ต้นทาง (เอาออก)
+                $log_from = "[$user_action] ถอดอุปกรณ์ {$eq_name} (S/N: $sn1) ออกไปยังตู้ {$to_info['cabinet_id']}";
+                $conn->query("INSERT INTO activity_logs (project_id, action_type, description) VALUES ($from_pid, 'TRANSFER_EQUIPMENT', '$log_from')");
+                
+                // บันทึก Log ตู้ปลายทาง (ใส่เข้า)
+                $log_to = "[$user_action] นำอุปกรณ์ {$eq_name} (S/N: $sn1) เข้าสู่ตู้ {$to_info['cabinet_id']} (ย้ายมาจากตู้ {$from_info['cabinet_id']})";
+                $conn->query("INSERT INTO activity_logs (project_id, action_type, description) VALUES ($to_pid, 'TRANSFER_EQUIPMENT', '$log_to')");
+
+                $success_msg = "โยกย้ายอุปกรณ์ {$eq_name} สำเร็จเรียบร้อยแล้ว!";
+            }
+
+        } else {
+            $error_msg = "เกิดข้อผิดพลาดในการดึงข้อมูล!";
+        }
+    } else {
+        $error_msg = "กรุณาเลือกตู้ต้นทาง, อุปกรณ์ และตู้ปลายทางให้ถูกต้อง (ห้ามซ้ำกัน)";
+    }
 }
 
-$eq_res = $conn->query("
-    SELECT e.*, p.project_name 
-    FROM equipments e 
-    JOIN projects p ON e.project_id = p.id 
-    ORDER BY p.project_name ASC, e.equipment_name ASC
-");
-$equipments = [];
-while($eq = $eq_res->fetch_assoc()) {
-    $equipments[] = $eq;
-}
+// ==========================================
+// 🌟 2. ดึงข้อมูลเตรียมไว้แสดงใน Dropdown
+// ==========================================
+$projects = $conn->query("SELECT id, project_name, cabinet_id FROM projects ORDER BY id DESC")->fetch_all(MYSQLI_ASSOC);
+$equipments = $conn->query("SELECT id, project_id, equipment_name, serial_number FROM equipments ORDER BY equipment_name ASC")->fetch_all(MYSQLI_ASSOC);
+
+$eq_json = json_encode($equipments, JSON_UNESCAPED_UNICODE);
 ?>
 <!DOCTYPE html>
-<html lang="th" data-bs-theme="dark">
+<html lang="th">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบโยกย้าย / สลับอุปกรณ์</title>
-    <!-- โหลด Bootstrap 5 CSS -->
+    <title>โยกย้ายอุปกรณ์ - Sync Vibe</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- โหลด Bootstrap Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
-    <!-- โหลด jQuery -->
-    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-    <!-- โหลด Select2 CSS & JS -->
-    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
-    <link href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" rel="stylesheet" />
-    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <link rel="stylesheet" href="style.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <style>
-        .transfer-arrow { font-size: 2.5rem; color: #06b6d4; }
-        .swap-arrow { font-size: 2.5rem; color: #f59e0b; }
+        body { background-color: #f8fafc; color: #1e293b; }
         
-        /* Custom Modal Backdrop Overlay ไร้บั๊กการโหลดสคริปต์ */
-        .custom-modal-backdrop {
-            position: fixed;
-            top: 0; left: 0; width: 100vw; height: 100vh;
-            background: rgba(0,0,0,0.85);
-            display: none;
-            justify-content: center;
-            align-items: center;
-            z-index: 2000;
+        .transfer-wrapper { position: relative; padding: 2rem 0; }
+        .process-line { 
+            position: absolute; top: 50%; left: 15%; right: 15%; height: 3px; 
+            background-image: linear-gradient(to right, #cbd5e1 50%, transparent 50%); 
+            background-size: 15px 3px; background-repeat: repeat-x; z-index: 0; transform: translateY(-50%); opacity: 0.5;
         }
-        .custom-modal-dialog {
-            background: #181b24;
-            border: 1px solid #2e3446;
-            border-radius: 12px;
-            max-width: 500px;
-            width: 90%;
-            padding: 24px;
-            color: #fff;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+
+        .step-card { 
+            background: #ffffff; border-radius: 1.5rem; padding: 2.5rem 2rem; text-align: center;
+            position: relative; z-index: 1; border: 1px solid #f1f5f9; box-shadow: 0 10px 30px rgba(0,0,0,0.03); 
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); height: 100%; display: flex; flex-direction: column;
         }
+        .step-card:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(0,0,0,0.06); }
+        
+        .icon-wrapper { 
+            width: 72px; height: 72px; border-radius: 1.25rem; display: flex; justify-content: center; align-items: center; 
+            font-size: 2rem; margin: 0 auto 1.5rem auto; box-shadow: 0 8px 16px rgba(0,0,0,0.06); transition: transform 0.3s ease;
+        }
+        .step-card:hover .icon-wrapper { transform: scale(1.05) rotate(-3deg); }
+
+        .icon-source { background: linear-gradient(135deg, #e9d5ff 0%, #c084fc 100%); color: #4c1d95; }
+        .icon-equip { background: linear-gradient(135deg, #bfdbfe 0%, #93c5fd 100%); color: #1e3a8a; }
+        .icon-target { background: linear-gradient(135deg, #bbf7d0 0%, #86efac 100%); color: #14532d; }
+
+        .bg-purple { background-color: #a855f7 !important; }
+        .text-purple { color: #7e22ce !important; }
+        .border-purple { border-color: #d8b4fe !important; }
+
+        .step-title { font-size: 1.1rem; font-weight: 700; color: #334155; margin-bottom: 0.5rem; }
+        .step-desc { font-size: 0.85rem; color: #64748b; margin-bottom: 1.5rem; }
+        .step-badge { font-size: 0.75rem; font-weight: 800; letter-spacing: 1px; padding: 0.4rem 0.8rem; border-radius: 20px; position: absolute; top: -12px; left: 50%; transform: translateX(-50%); box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+
+        .form-select-modern { 
+            background-color: #f8fafc; border: 2px solid #e2e8f0; border-radius: 1rem; padding: 0.8rem 1rem;
+            font-size: 0.95rem; font-weight: 600; color: #1e293b; cursor: pointer; transition: all 0.2s ease;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.02); text-align: left; margin-top: auto; 
+        }
+        .form-select-modern:focus { border-color: #3b82f6; background-color: #ffffff; box-shadow: 0 0 0 4px rgba(59,130,246,0.1); outline: none; }
+        .form-select-modern:disabled { background-color: #f1f5f9; color: #94a3b8; cursor: not-allowed; border-color: #e2e8f0; }
+
+        .btn-submit-modern { 
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; border: none; border-radius: 1rem; 
+            font-weight: 700; padding: 1rem 2rem; font-size: 1.1rem; box-shadow: 0 10px 20px rgba(16,185,129,0.2); transition: all 0.3s; 
+        }
+        .btn-submit-modern:hover:not(:disabled) { transform: translateY(-3px); box-shadow: 0 15px 25px rgba(16,185,129,0.3); }
+        .btn-submit-modern:disabled { background: #cbd5e1; box-shadow: none; transform: none; color: #64748b; }
+
+        .arrow-mobile { font-size: 2rem; color: #cbd5e1; text-align: center; margin: -10px 0; z-index: 0; }
+
+        .custom-modal-backdrop { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1050; display: flex; align-items: center; justify-content: center; }
+        .custom-modal-dialog { background: #ffffff; border-radius: 1.5rem; width: 90%; max-width: 600px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); overflow: hidden; }
+        .summary-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 1rem; padding: 1.25rem; margin-bottom: 1rem; }
     </style>
 </head>
 <body>
     <div class="app-container">
         <?php include 'sidebar.php'; ?>
-
         <main class="main-content">
-            <div class="d-flex justify-content-between align-items-center mb-4 pb-2 border-bottom border-secondary">
-                <div>
-                    <h2 class="fw-bold m-0 text-white"><i class="bi bi-arrow-left-right text-success me-2"></i>ระบบโยกย้าย & สลับอุปกรณ์</h2>
-                    <small class="text-secondary">จัดการย้ายตู้หรือสลับสับเปลี่ยนอุปกรณ์ระหว่างโครงการอย่างสะดวกรวดเร็ว</small>
+            
+            <div class="mb-4 pb-3 border-bottom border-light animate-fade-up">
+                <div class="d-flex align-items-center gap-3">
+                    <div class="bg-info bg-opacity-10 text-info rounded-4 d-flex justify-content-center align-items-center shadow-sm" style="width: 55px; height: 55px; font-size: 1.8rem;">
+                        <i class="bi bi-arrow-left-right"></i>
+                    </div>
+                    <div>
+                        <h2 class="fw-bold text-dark m-0">ระบบโยกย้ายและสลับอุปกรณ์</h2>
+                        <p class="text-secondary m-0 mt-1">ย้ายอุปกรณ์ข้ามตู้โครงการ หากตู้ปลายทางมีของอยู่แล้วระบบจะทำการ <b>สลับกัน (Swap)</b> อัตโนมัติ</p>
+                    </div>
                 </div>
             </div>
 
-            <form id="transferForm" action="save_transfer.php" method="POST">
-                <div class="row g-4">
-                    <!-- ฝั่งต้นทาง (Side A) -->
-                    <div class="col-xl-5 col-lg-12">
-                        <div class="card card-custom h-100 p-4 shadow-sm border-primary">
-                            <h5 class="fw-bold text-primary mb-3 pb-2 border-bottom border-secondary"><i class="bi bi-box-seam me-2"></i>1. ฝั่งต้นทาง (โครงการ A)</h5>
-                            
-                            <div class="mb-3">
-                                <label class="form-label text-secondary">ค้นหาและเลือกอุปกรณ์ต้นทาง *</label>
-                                <select id="source_eq_id" name="source_eq_id" class="form-select select2-searchable" required>
-                                    <option value="">🔍 พิมพ์ค้นหา (ชื่ออุปกรณ์ / S/N / โครงการ)...</option>
-                                    <?php foreach($equipments as $eq): ?>
-                                        <option value="<?= $eq['id'] ?>" 
-                                                data-name="<?= htmlspecialchars($eq['equipment_name']) ?>"
-                                                data-sn="<?= htmlspecialchars($eq['serial_number']) ?>"
-                                                data-proj-id="<?= $eq['project_id'] ?>"
-                                                data-proj-name="<?= htmlspecialchars($eq['project_name']) ?>"
-                                                data-cab-type="<?= $eq['cabinet_type'] ?>">
-                                            [<?= htmlspecialchars($eq['project_name']) ?>] <?= htmlspecialchars($eq['equipment_name']) ?> (S/N: <?= htmlspecialchars($eq['serial_number']) ?>) - <?= $eq['cabinet_type'] === 'control_iot' ? 'ตู้ Control' : 'ตู้ DC' ?>
-                                        </option>
+            <?php if($success_msg): ?>
+                <div class="alert alert-success d-flex align-items-center border-0 shadow-sm rounded-4 fw-bold p-3 mb-4 animate-fade-up" role="alert">
+                    <div class="bg-white text-success rounded-circle d-flex justify-content-center align-items-center me-3" style="width: 32px; height: 32px;"><i class="bi bi-check-lg"></i></div>
+                    <div><?= $success_msg ?></div>
+                    <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            <?php endif; ?>
+            
+            <?php if($error_msg): ?>
+                <div class="alert alert-danger d-flex align-items-center border-0 shadow-sm rounded-4 fw-bold p-3 mb-4 animate-fade-up" role="alert">
+                    <div class="bg-white text-danger rounded-circle d-flex justify-content-center align-items-center me-3" style="width: 32px; height: 32px;"><i class="bi bi-exclamation-triangle-fill"></i></div>
+                    <div><?= $error_msg ?></div>
+                    <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+            <?php endif; ?>
+
+            <form action="" method="POST" id="transferForm">
+                <div class="transfer-wrapper animate-fade-up" style="animation-delay: 0.1s;">
+                    <div class="d-none d-lg-block process-line"></div>
+                    <div class="row g-4 position-relative">
+                        
+                        <!-- 🟣 STEP 1: ตู้ต้นทาง -->
+                        <div class="col-lg-4">
+                            <div class="step-card" style="border-color: #f3e8ff;">
+                                <span class="badge bg-purple text-white step-badge">STEP 1</span>
+                                <div class="icon-wrapper icon-source"><i class="bi bi-box-arrow-up"></i></div>
+                                <div class="step-title">1. ตู้ต้นทาง</div>
+                                <div class="step-desc">เลือกตู้ที่คุณต้องการนำอุปกรณ์ออก</div>
+                                
+                                <select class="form-select form-select-modern border-purple" name="from_project_id" id="from_project_id" required>
+                                    <option value="" selected disabled>-- เลือกตู้ต้นทาง --</option>
+                                    <?php foreach($projects as$p): ?>
+                                        <option value="<?= $p['id'] ?>">ID: <?= htmlspecialchars($p['cabinet_id']) ?> (<?= htmlspecialchars($p['project_name']) ?>)</option>
                                     <?php endforeach; ?>
                                 </select>
                             </div>
-                            
-                            <div id="source_info_box" class="p-3 rounded bg-dark border border-secondary mt-3" style="display:none;">
-                                <div class="small text-secondary mb-1 fw-bold">รายละเอียดต้นทาง:</div>
-                                <div class="fw-bold text-info fs-5" id="src_name_disp"></div>
-                                <div class="small mt-1">Serial Number: <span id="src_sn_disp" class="text-warning fw-bold"></span></div>
-                                <div class="small">โครงการต้นทาง: <span id="src_proj_disp" class="text-white"></span></div>
-                                <div class="small">ตู้: <span id="src_cab_disp" class="text-info"></span></div>
+                        </div>
+
+                        <div class="d-block d-lg-none arrow-mobile"><i class="bi bi-arrow-down"></i></div>
+
+                        <!-- 🔵 STEP 2: เลือกอุปกรณ์ -->
+                        <div class="col-lg-4">
+                            <div class="step-card" style="border-color: #bfdbfe;">
+                                <span class="badge bg-primary text-white step-badge">STEP 2</span>
+                                <div class="icon-wrapper icon-equip"><i class="bi bi-hdd-network"></i></div>
+                                <div class="step-title">2. อุปกรณ์</div>
+                                <div class="step-desc">ชิ้นส่วนอุปกรณ์ที่ต้องการดำเนินการ</div>
+                                
+                                <select class="form-select form-select-modern border-primary border-opacity-25" name="equipment_id" id="equipment_id" required disabled>
+                                    <option value="" selected disabled>-- กรุณาเลือกตู้ต้นทางก่อน --</option>
+                                </select>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- สถานะโหมด -->
-                    <div class="col-xl-2 col-lg-12 d-flex flex-column justify-content-center align-items-center text-center">
-                        <div id="mode_icon_box" class="my-2">
-                            <i id="mode_icon" class="bi bi-arrow-right-circle-fill transfer-arrow"></i>
-                        </div>
-                        <span id="mode_badge" class="badge bg-info text-dark px-3 py-2 fw-bold">ย้ายอุปกรณ์</span>
-                    </div>
+                        <div class="d-block d-lg-none arrow-mobile"><i class="bi bi-arrow-down"></i></div>
 
-                    <!-- ฝั่งปลายทาง (Side B) -->
-                    <div class="col-xl-5 col-lg-12">
-                        <div class="card card-custom h-100 p-4 shadow-sm border-info">
-                            <h5 class="fw-bold text-info mb-3 pb-2 border-bottom border-secondary"><i class="bi bi-box-arrow-in-down-right me-2"></i>2. ฝั่งปลายทาง (โครงการ B)</h5>
-
-                            <div class="mb-3">
-                                <label class="form-label text-secondary">ตู้ปลายทาง (ตรงกับตู้ต้นทาง)</label>
-                                <input type="text" id="target_cabinet_disp" class="form-control bg-dark text-info border-secondary fw-bold" value="-- ตรงกับตู้ต้นทาง --" readonly>
-                                <input type="hidden" id="target_cabinet_type" name="target_cabinet_type" value="">
-                            </div>
-
-                            <div class="mb-3">
-                                <label class="form-label text-secondary">ค้นหาโครงการปลายทาง * (ตัดโครงการ A ออก)</label>
-                                <select id="target_project_id" name="target_project_id" class="form-select select2-searchable" required>
-                                    <option value="">🔍 พิมพ์ค้นหาโครงการปลายทาง...</option>
-                                    <?php foreach($projects as $p): ?>
-                                        <option value="<?= $p['id'] ?>" data-name="<?= htmlspecialchars($p['project_name']) ?>">
-                                            <?= htmlspecialchars($p['project_name']) ?>
-                                        </option>
+                        <!-- 🟢 STEP 3: ตู้ปลายทาง -->
+                        <div class="col-lg-4">
+                            <div class="step-card" style="border-color: #bbf7d0;">
+                                <span class="badge bg-success text-white step-badge">STEP 3</span>
+                                <div class="icon-wrapper icon-target"><i class="bi bi-box-arrow-in-down"></i></div>
+                                <div class="step-title">3. ตู้ปลายทาง</div>
+                                <div class="step-desc">เลือกตู้ที่ต้องการนำอุปกรณ์ชิ้นนี้ไปใส่</div>
+                                
+                                <select class="form-select form-select-modern border-success border-opacity-25" name="to_project_id" id="to_project_id" required disabled>
+                                    <option value="" selected disabled>-- เลือกตู้ปลายทาง --</option>
+                                    <?php foreach($projects as$p): ?>
+                                        <option value="<?= $p['id'] ?>">ID: <?= htmlspecialchars($p['cabinet_id']) ?> (<?= htmlspecialchars($p['project_name']) ?>)</option>
                                     <?php endforeach; ?>
                                 </select>
                             </div>
-
-                            <div id="target_info_box" class="p-3 rounded bg-dark border border-secondary mb-3" style="display:none;">
-                                <div class="small text-secondary mb-1 fw-bold">รายละเอียดปลายทาง:</div>
-                                <div class="fw-bold text-success fs-5" id="tgt_proj_disp"></div>
-                                <div class="small">ตู้ปลายทาง: <span id="tgt_cab_disp" class="text-info"></span></div>
-                                <div class="small mt-1" id="tgt_eq_status"></div>
-                            </div>
-
-                            <div class="mb-3">
-                                <label class="form-label text-secondary">อุปกรณ์สลับคู่ (เฉพาะชื่อตรงกัน):</label>
-                                <select id="target_eq_id" name="target_eq_id" class="form-select select2-searchable">
-                                    <option value="NONE">-- ไม่สลับ (ย้ายเข้าเป็นชิ้นใหม่) --</option>
-                                </select>
-                            </div>
                         </div>
+
                     </div>
                 </div>
 
-                <div class="mt-4">
-                    <button type="button" class="btn btn-success btn-lg w-100 py-3 fw-bold shadow" onclick="showConfirmModal()">
-                        <i class="bi bi-check-circle-fill me-2"></i> ตรวจสอบและยืนยันรายการ
+                <!-- ปุ่มตรวจสอบความถูกต้อง -->
+                <div class="text-center mt-5 mb-3 animate-fade-up" style="animation-delay: 0.2s;">
+                    <button type="button" class="btn btn-submit-modern px-5" id="previewBtn" disabled>
+                        <i class="bi bi-search me-2"></i> ตรวจสอบและยืนยัน
                     </button>
+                    <p class="text-secondary small mt-3"><i class="bi bi-info-circle me-1"></i> ระบบจะวิเคราะห์และสลับอุปกรณ์ให้โดยอัตโนมัติหากตู้ปลายทางมีของชิ้นนั้นอยู่แล้ว</p>
                 </div>
             </form>
+
         </main>
     </div>
 
-    <!-- Custom Pop-up Modal ยืนยันข้อมูล (เปิดได้ 100% ไร้ข้อผิดพลาด) -->
-    <div id="confirmModalBox" class="custom-modal-backdrop">
-        <div class="custom-modal-dialog">
-            <div class="d-flex justify-content-between align-items-center pb-2 mb-3 border-bottom border-secondary">
-                <h5 class="fw-bold text-info m-0"><i class="bi bi-shield-check me-2"></i>ยืนยันการโยกย้าย / สลับอุปกรณ์</h5>
-                <button type="button" class="btn-close btn-close-white" onclick="closeConfirmModal()"></button>
+    <!-- 🌟 Modal สรุปผลการโยกย้าย (Confirmation) -->
+    <div id="confirmModal" class="custom-modal-backdrop" style="display: none;">
+        <div class="custom-modal-dialog animate-fade-up">
+            <div class="bg-light p-4 border-bottom d-flex justify-content-between align-items-center">
+                <h5 class="fw-bold text-dark m-0"><i class="bi bi-clipboard-data text-success me-2"></i>สรุปรายการดำเนินการ</h5>
+                <button type="button" class="btn-close" onclick="closeConfirmModal()"></button>
             </div>
-            <div id="summaryContent" class="p-3 bg-dark rounded border border-secondary mb-3"></div>
-            <div class="alert alert-warning py-2 mb-3 small">
-                <i class="bi bi-exclamation-triangle-fill me-1"></i> กรุณาตรวจสอบความถูกต้องก่อนยืนยัน ระบบจะทำการบันทึกประวัติ (Log) ทันที
-            </div>
-            <div class="d-flex gap-2 justify-content-end">
-                <button type="button" class="btn btn-outline-secondary" onclick="closeConfirmModal()">ยกเลิก / แก้ไข</button>
-                <button type="button" class="btn btn-success px-4" onclick="submitTransfer()"><i class="bi bi-save me-1"></i> ยืนยันบันทึกข้อมูล</button>
+            
+            <div class="p-4 bg-white">
+                <div class="summary-box">
+                    <div class="row align-items-center text-center">
+                        <div class="col-5">
+                            <div class="text-secondary small fw-bold text-uppercase mb-1">ตู้ต้นทาง</div>
+                            <div class="text-purple fw-bold" id="summaryFrom"></div>
+                        </div>
+                        <div class="col-2 text-secondary fs-4" id="actionIcon"><i class="bi bi-arrow-right"></i></div>
+                        <div class="col-5">
+                            <div class="text-secondary small fw-bold text-uppercase mb-1">ตู้ปลายทาง</div>
+                            <div class="text-success fw-bold" id="summaryTo"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="summary-box border-primary bg-primary bg-opacity-10 d-flex align-items-center gap-3">
+                    <div class="bg-white text-primary rounded-circle d-flex justify-content-center align-items-center shadow-sm" style="width: 45px; height: 45px; font-size: 1.5rem;"><i class="bi bi-cpu"></i></div>
+                    <div>
+                        <div class="text-secondary small fw-bold text-uppercase">อุปกรณ์ที่กำลังดำเนินการ</div>
+                        <div class="fw-bold text-dark fs-6" id="summaryEq"></div>
+                    </div>
+                </div>
+
+                <!-- ส่วนตรวจสอบอุปกรณ์ปลายทางอัตโนมัติ -->
+                <div id="destCheckStatus">
+                    <!-- ข้อมูลจะถูกแทรกที่นี่โดย JS -->
+                </div>
+
+                <div class="d-flex justify-content-end gap-2 mt-4 pt-3 border-top">
+                    <button type="button" class="btn btn-light rounded-pill px-4 fw-bold text-secondary" onclick="closeConfirmModal()">ยกเลิก</button>
+                    <button type="button" class="btn btn-success rounded-pill px-4 fw-bold shadow-sm" onclick="submitTransfer()">
+                        <i class="bi bi-check-circle me-1"></i> ยืนยันข้อมูลถูกต้อง
+                    </button>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        const allProjects = <?= json_encode($projects) ?>;
-        const allEquipments = <?= json_encode($equipments) ?>;
+        const allEquipments = <?= $eq_json ?>;
 
         $(document).ready(function() {
-            $('.select2-searchable').select2({
-                theme: 'bootstrap-5',
-                width: '100%',
-                placeholder: '🔍 พิมพ์เพื่อค้นหาข้อมูล...'
+            const $fromProject =$('#from_project_id');
+            const $equipment =$('#equipment_id');
+            const $toProject =$('#to_project_id');
+            const $previewBtn =$('#previewBtn');
+
+            // 1. เมื่อเลือกตู้ต้นทาง
+            $fromProject.on('change', function() {
+                const selectedProjectId = $(this).val();$equipment.empty().append('<option value="" selected disabled>-- เลือกอุปกรณ์ --</option>');
+                
+                let hasEquip = false;
+                allEquipments.forEach(function(eq) {
+                    if (eq.project_id == selectedProjectId) {
+                        const snText = eq.serial_number ? ` (S/N: ${eq.serial_number})` : '';
+                        $equipment.append(`<option value="${eq.id}" data-name="${eq.equipment_name}">${eq.equipment_name}${snText}</option>`);
+                        hasEquip = true;
+                    }
+                });
+
+                if(hasEquip) {
+                    $equipment.prop('disabled', false);$equipment.find('option:first').text('-- เลือกชิ้นส่วนที่ต้องการ --'); 
+                } else {
+                    $equipment.empty().append('<option value="" selected disabled>ตู้นี้ไม่มีอุปกรณ์ให้ย้าย</option>');
+                    $equipment.prop('disabled', true);
+                }
+
+                $toProject.prop('disabled', false);
+                $toProject.find('option').show();$toProject.find(`option[value="${selectedProjectId}"]`).hide(); 
+                
+                if($toProject.val() == selectedProjectId) {$toProject.val('');
+                }
+                
+                checkSubmitStatus();
             });
 
-            $('#source_eq_id').on('change', function() { onSourceChange(); });
-            $('#target_project_id').on('change', function() { onTargetChange(); });
-            $('#target_eq_id').on('change', function() { onTargetEqChange(); });
+            // 2. ตรวจสอบปุ่มยืนยัน
+            $equipment.on('change', checkSubmitStatus);$toProject.on('change', checkSubmitStatus);
+
+            function checkSubmitStatus() {
+                if($fromProject.val() &&$equipment.val() && $toProject.val()) {$previewBtn.prop('disabled', false);
+                } else {
+                    $previewBtn.prop('disabled', true);
+                }
+            }
+
+            // 3. เมื่อกดปุ่มตรวจสอบและยืนยัน
+            $previewBtn.on('click', function(e) {
+                e.preventDefault();
+                
+                let fromText = $('#from_project_id option:selected').text();
+                let eqText = $('#equipment_id option:selected').text();
+                let eqName = $('#equipment_id option:selected').data('name'); 
+                let toText = $('#to_project_id option:selected').text();
+                let toId = $('#to_project_id').val();
+                
+                $('#summaryFrom').text(fromText.split(' (')[0]); 
+                $('#summaryEq').text(eqText);
+                $('#summaryTo').text(toText.split(' (')[0]);
+
+                // 🌟 ระบบวิเคราะห์ (Move or Swap)
+                let destEquips = allEquipments.filter(eq => eq.project_id == toId);
+                let duplicateEq = destEquips.find(eq => eq.equipment_name === eqName);
+                
+                let statusHtml = '<h6 class="fw-bold text-dark mt-4 mb-2">สรุปการดำเนินการอัตโนมัติ:</h6>';
+                
+                if(duplicateEq) {
+                    // กรณี "สลับ" อุปกรณ์ (SWAP)
+                    let snText = duplicateEq.serial_number ? duplicateEq.serial_number : 'ไม่มี S/N';
+                    $('#actionIcon').html('<i class="bi bi-arrow-left-right text-warning"></i>');
+                    
+                    statusHtml += `<div class="alert alert-warning border border-warning shadow-sm mb-0">
+                        <i class="bi bi-arrow-left-right me-1 fs-5 text-warning align-middle"></i> 
+                        <b>ระบบตรวจพบอุปกรณ์ชนิดเดียวกันในตู้ปลายทาง</b><br>
+                        <div class="mt-2 text-dark">
+                            ตู้ปลายทางมี <b>${eqName}</b> อยู่แล้ว (S/N: ${snText}) <br>
+                            👉 <u>ระบบจะทำการ "สลับ (Swap)" อุปกรณ์ทั้ง 2 ชิ้นนี้เข้าหากันแทนการย้ายปกติ</u>
+                        </div>
+                    </div>`;
+                } else {
+                    // กรณี "ย้าย" ปกติ (MOVE)
+                    $('#actionIcon').html('<i class="bi bi-arrow-right text-success"></i>');
+                    
+                    statusHtml += `<div class="alert alert-success border border-success shadow-sm mb-0">
+                        <i class="bi bi-arrow-right-circle-fill me-1 fs-5 text-success align-middle"></i> 
+                        <b>ระบบจะทำการ "โยกย้าย" ปกติ</b><br>
+                        <div class="mt-1 text-dark">
+                            ตู้ปลายทางยังไม่มี ${eqName} ระบบจะย้ายอุปกรณ์ชิ้นนี้เข้าไปติดตั้งใหม่ และตู้ต้นทางจะไม่มีอุปกรณ์ชิ้นนี้
+                        </div>
+                    </div>`;
+                }
+
+                $('#destCheckStatus').html(statusHtml);
+                $('#confirmModal').fadeIn(200).css('display', 'flex');
+            });
         });
 
-        function onSourceChange() {
-            const srcOpt = $('#source_eq_id').find(':selected');
-            const infoBox = document.getElementById('source_info_box');
-
-            if (!srcOpt.val()) {
-                infoBox.style.display = 'none';
-                updateTargetProjectsList(null);
-                return;
-            }
-
-            const srcProjId = srcOpt.attr('data-proj-id');
-            const srcCabType = srcOpt.attr('data-cab-type');
-            const srcEqName = srcOpt.attr('data-name');
-            const srcSN = srcOpt.attr('data-sn');
-            const srcProjName = srcOpt.attr('data-proj-name');
-
-            document.getElementById('src_name_disp').innerText = srcEqName;
-            document.getElementById('src_sn_disp').innerText = srcSN;
-            document.getElementById('src_proj_disp').innerText = srcProjName;
-            document.getElementById('src_cab_disp').innerText = srcCabType === 'control_iot' ? 'ตู้ Control IoT' : 'ตู้ DC-IoT';
-            infoBox.style.display = 'block';
-
-            document.getElementById('target_cabinet_type').value = srcCabType;
-            document.getElementById('target_cabinet_disp').value = srcCabType === 'control_iot' ? 'ตู้ Control IoT (อัตโนมัติ)' : 'ตู้ DC-IoT (อัตโนมัติ)';
-
-            updateTargetProjectsList(srcProjId);
-        }
-
-        function updateTargetProjectsList(sourceProjId) {
-            const targetProjSelect = $('#target_project_id');
-            const currentVal = targetProjSelect.val();
-
-            targetProjSelect.empty();
-            targetProjSelect.append(new Option('🔍 พิมพ์ค้นหาโครงการปลายทาง...', ''));
-
-            allProjects.forEach(p => {
-                if (!sourceProjId || p.id != sourceProjId) {
-                    const opt = new Option(p.project_name, p.id);
-                    $(opt).attr('data-name', p.project_name);
-                    targetProjSelect.append(opt);
-                }
-            });
-
-            if (currentVal && currentVal != sourceProjId) {
-                targetProjSelect.val(currentVal);
-            } else {
-                targetProjSelect.val('');
-            }
-
-            targetProjSelect.trigger('change');
-        }
-
-        function onTargetChange() {
-            const srcOpt = $('#source_eq_id').find(':selected');
-            const tgtProjOpt = $('#target_project_id').find(':selected');
-            const targetInfoBox = document.getElementById('target_info_box');
-
-            if (!tgtProjOpt.val() || !srcOpt.val()) {
-                targetInfoBox.style.display = 'none';
-                updateTargetEquipmentsList();
-                return;
-            }
-
-            const srcEqName = srcOpt.attr('data-name');
-            const srcCabType = srcOpt.attr('data-cab-type');
-
-            const tgtProjName = tgtProjOpt.attr('data-name');
-            const tgtProjId = tgtProjOpt.val();
-
-            const cabNameLabel = srcCabType === 'control_iot' ? 'ตู้ Control IoT' : 'ตู้ DC-IoT';
-
-            document.getElementById('tgt_proj_disp').innerText = tgtProjName;
-            document.getElementById('tgt_cab_disp').innerText = cabNameLabel;
-
-            const existingMatch = allEquipments.find(eq => 
-                eq.project_id == tgtProjId && 
-                eq.cabinet_type == srcCabType && 
-                eq.equipment_name.trim() === srcEqName.trim()
-            );
-
-            if (existingMatch) {
-                document.getElementById('tgt_eq_status').innerHTML = `<span class="text-warning fw-bold"><i class="bi bi-exclamation-triangle me-1"></i> พบอุปกรณ์ ${existingMatch.equipment_name} (S/N: ${existingMatch.serial_number}) ในตู้ปลายทางแล้ว</span>`;
-            } else {
-                document.getElementById('tgt_eq_status').innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i> ตู้ปลายทางยังไม่มีอุปกรณ์ ${srcEqName} (สามารถย้ายเข้าเป็นชิ้นใหม่ได้)</span>`;
-            }
-
-            targetInfoBox.style.display = 'block';
-            updateTargetEquipmentsList();
-        }
-
-        function updateTargetEquipmentsList() {
-            const srcOpt = $('#source_eq_id').find(':selected');
-            const tgtProjOpt = $('#target_project_id').find(':selected');
-            const targetEqSelect = $('#target_eq_id');
-
-            targetEqSelect.empty();
-            
-            const defaultOpt = document.createElement('option');
-            defaultOpt.value = 'NONE';
-            defaultOpt.innerText = '-- ไม่สลับ (ย้ายเข้าเป็นชิ้นใหม่) --';
-            targetEqSelect.append(defaultOpt);
-
-            if (!srcOpt.val() || !tgtProjOpt.val()) {
-                targetEqSelect.trigger('change');
-                return;
-            }
-
-            const srcEqName = srcOpt.attr('data-name');
-            const srcCabType = srcOpt.attr('data-cab-type');
-            const targetProjId = tgtProjOpt.val();
-
-            const matchedEqs = allEquipments.filter(eq => 
-                eq.project_id == targetProjId && 
-                eq.cabinet_type == srcCabType && 
-                eq.equipment_name.trim() === srcEqName.trim()
-            );
-
-            matchedEqs.forEach(eq => {
-                const optText = `🔄 สลับกับ: ${eq.equipment_name} (S/N: ${eq.serial_number})`;
-                const newOpt = document.createElement('option');
-                newOpt.value = eq.id;
-                newOpt.innerText = optText;
-                newOpt.setAttribute('data-name', eq.equipment_name);
-                newOpt.setAttribute('data-sn', eq.serial_number);
-                targetEqSelect.append(newOpt);
-            });
-
-            targetEqSelect.trigger('change');
-            onTargetEqChange();
-        }
-
-        function onTargetEqChange() {
-            const targetEqVal = $('#target_eq_id').val();
-            const icon = document.getElementById('mode_icon');
-            const badge = document.getElementById('mode_badge');
-
-            if (targetEqVal && targetEqVal !== 'NONE') {
-                icon.className = 'bi bi-arrow-left-right swap-arrow';
-                badge.className = 'badge bg-warning text-dark px-3 py-2 fw-bold';
-                badge.innerText = '🔄 โหมดสลับอุปกรณ์คู่ออโต้';
-            } else {
-                icon.className = 'bi bi-arrow-right-circle-fill transfer-arrow';
-                badge.className = 'badge bg-info text-dark px-3 py-2 fw-bold';
-                badge.innerText = '➡️ โหมดโยกย้ายอุปกรณ์';
-            }
-        }
-
-        function showConfirmModal() {
-            const srcOpt = $('#source_eq_id').find(':selected');
-            const targetProjOpt = $('#target_project_id').find(':selected');
-            const targetEqOpt = $('#target_eq_id').find(':selected');
-
-            if (!srcOpt.val() || !targetProjOpt.val()) {
-                alert('กรุณาเลือกอุปกรณ์ต้นทางและโครงการปลายทางให้ครบถ้วนก่อนครับ');
-                return;
-            }
-
-            const srcName = srcOpt.attr('data-name');
-            const srcSN = srcOpt.attr('data-sn');
-            const srcProj = srcOpt.attr('data-proj-name');
-            const srcCab = srcOpt.attr('data-cab-type') === 'control_iot' ? 'ตู้ Control IoT' : 'ตู้ DC-IoT';
-
-            const targetProjName = targetProjOpt.attr('data-name');
-
-            let html = '';
-
-            if (targetEqOpt.val() && targetEqOpt.val() !== 'NONE') {
-                const tgtName = targetEqOpt.attr('data-name');
-                const tgtSN = targetEqOpt.attr('data-sn');
-
-                html = `
-                    <div class="text-warning fw-bold mb-2"><i class="bi bi-arrow-left-right me-1"></i> ยืนยันการสลับอุปกรณ์คู่อัตโนมัติ:</div>
-                    <div class="p-2 mb-2 rounded bg-secondary bg-opacity-25 border border-warning">
-                        <strong>ชิ้นที่ 1 (ย้าย A -> B):</strong> ${srcName} (S/N: ${srcSN})<br>
-                        <small class="text-secondary">ย้ายจาก: ${srcProj} [${srcCab}] ➡️ ${targetProjName} [${srcCab}]</small>
-                    </div>
-                    <div class="p-2 rounded bg-secondary bg-opacity-25 border border-warning">
-                        <strong>ชิ้นที่ 2 (สลับ B -> A):</strong> ${tgtName} (S/N: ${tgtSN})<br>
-                        <small class="text-secondary">สลับไปใส่ที่: ${srcProj} [${srcCab}] ⬅️ ${targetProjName} [${srcCab}]</small>
-                    </div>
-                `;
-            } else {
-                html = `
-                    <div class="text-info fw-bold mb-2"><i class="bi bi-arrow-right-circle me-1"></i> ยืนยันการย้ายอุปกรณ์:</div>
-                    <p class="mb-1"><strong>อุปกรณ์:</strong> <span class="text-info">${srcName}</span> (S/N: ${srcSN})</p>
-                    <p class="mb-1"><strong>🔴 ต้นทาง:</strong> ${srcProj} [${srcCab}]</p>
-                    <p class="mb-0"><strong>🟢 ปลายทาง:</strong> ${targetProjName} [${srcCab}]</p>
-                `;
-            }
-
-            document.getElementById('summaryContent').innerHTML = html;
-            
-            document.getElementById('confirmModalBox').style.display = 'flex';
-        }
-
         function closeConfirmModal() {
-            document.getElementById('confirmModalBox').style.display = 'none';
+            $('#confirmModal').fadeOut(200);
         }
 
         function submitTransfer() {
-            document.getElementById('transferForm').submit();
+            $('#confirmModal').fadeOut(100, function() {
+                $('#transferForm').submit();
+            });
         }
     </script>
 </body>
 </html>
-
-<!-- 11/8/2569 05:07 -->
